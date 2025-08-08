@@ -10,6 +10,7 @@ const Controls = () => {
     animationSpeed,
     handleSpeedChange,
     exportGif,
+    exportVideo,
     isExporting,
     exportProgress,
     cancelExport,
@@ -52,7 +53,7 @@ const Controls = () => {
             className={cx("mx-4")}
           />
         </div>
-        {/* Export GIF */}
+        {/* Exporters */}
         <div className={cx("flex items-center ml-4")}>
           <button
             onClick={() => exportGif({ fps: 12, scale: 1 })}
@@ -63,6 +64,26 @@ const Controls = () => {
             )}
           >
             Export GIF
+          </button>
+          <button
+            onClick={() => exportVideo({ fps: 24, scale: 1, format: "mp4" })}
+            disabled={isExporting}
+            className={cx(
+              "px-4 py-2 rounded bg-gray-200 hover:bg-gray-300 text-black mr-2",
+              { "opacity-50 cursor-not-allowed": isExporting }
+            )}
+          >
+            Export MP4
+          </button>
+          <button
+            onClick={() => exportVideo({ fps: 24, scale: 1, format: "mov" })}
+            disabled={isExporting}
+            className={cx(
+              "px-4 py-2 rounded bg-gray-200 hover:bg-gray-300 text-black mr-2",
+              { "opacity-50 cursor-not-allowed": isExporting }
+            )}
+          >
+            Export MOV
           </button>
           {isExporting && (
             <>

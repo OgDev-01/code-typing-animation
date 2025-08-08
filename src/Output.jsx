@@ -3,7 +3,8 @@ import { CodeContext } from "./CodeContext";
 import cx from "classnames"; // Importing cx from classnames package
 
 const Output = () => {
-  const { code, inputVisible, previewRef } = useContext(CodeContext);
+  const { code, inputVisible, previewRef, language, codeElRef } =
+    useContext(CodeContext);
 
   return (
     <div
@@ -38,10 +39,13 @@ const Output = () => {
         <div className={cx("p-5 rounded-b-2xl overflow-auto")}>
           <pre
             className={cx(
-              "language-javascript line-numbers text-sm leading-6 rounded-xl px-6 py-5"
+              `language-${language}`,
+              "line-numbers text-sm leading-6 rounded-xl px-6 py-5"
             )}
           >
-            <code>{code}</code>
+            <code ref={codeElRef} className={cx(`language-${language}`)}>
+              {code}
+            </code>
           </pre>
         </div>
       </div>

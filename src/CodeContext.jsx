@@ -13,9 +13,11 @@ import "prismjs/components/prism-css";
 import "prismjs/components/prism-yaml";
 import "prismjs/components/prism-python";
 import "prismjs/components/prism-java";
-import * as htmlToImage from "html-to-image";
+// import * as htmlToImage from "html-to-image";
 import GIF from "gif.js";
 import gifWorker from "gif.js/dist/gif.worker.js?url";
+import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { fetchFile } from "@ffmpeg/util";
 import "prism-themes/themes/prism-vsc-dark-plus.css"; // VSCode Dark+ theme
 import "prismjs/plugins/line-numbers/prism-line-numbers.js"; // Line numbers plugin
 import "prismjs/plugins/line-numbers/prism-line-numbers.css"; // Line numbers CSS
@@ -32,6 +34,8 @@ export const CodeProvider = ({ children }) => {
   const animationTimeout = useRef(null);
   const textareaRef = useRef(null);
   const previewRef = useRef(null);
+  const codeElRef = useRef(null);
+  const [suspendHighlight, setSuspendHighlight] = useState(false);
 
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
@@ -47,10 +51,27 @@ export const CodeProvider = ({ children }) => {
     return () => clearInterval(cursorInterval);
   }, []);
 
-  // Syntax highlighting with Prism
+  // Syntax highlighting with Prism (targeted + throttled)
   useEffect(() => {
-    Prism.highlightAllUnder(document.body);
-  }, [code, language]);
+    let rafId = null;
+    const el = codeElRef.current;
+    if (!el || suspendHighlight) return;
+    const schedule = () => {
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        try {
+          Prism.highlightElement(el);
+        } catch (_) {
+          /* ignore */
+        }
+      });
+    };
+    schedule();
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [code, language, suspendHighlight]);
 
   const handleInputChange = (event) => {
     setInput(event.target.value);
@@ -113,7 +134,103 @@ export const CodeProvider = ({ children }) => {
   const waitForNextFrame = (ms) =>
     new Promise((resolve) => setTimeout(resolve, ms));
 
-  const exportGif = async ({ fps = 12, scale = 1 } = {}) => {
+  const getLanguageGrammar = (lang) => {
+    return Prism.languages[lang] || Prism.languages.javascript;
+  };
+
+  const getTokenColor = (type) => {
+    switch (type) {
+      case "comment":
+      case "prolog":
+      case "doctype":
+      case "cdata":
+        return "#5c6370";
+      case "punctuation":
+        return "#abb2bf";
+      case "property":
+      case "tag":
+      case "constant":
+      case "symbol":
+      case "deleted":
+        return "#e06c75";
+      case "boolean":
+      case "number":
+        return "#d19a66";
+      case "selector":
+      case "attr-name":
+      case "string":
+      case "char":
+      case "builtin":
+      case "inserted":
+        return "#98c379";
+      case "operator":
+      case "entity":
+      case "url":
+        return "#56b6c2";
+      case "atrule":
+      case "keyword":
+      case "class-name":
+        return "#c678dd";
+      case "function":
+      case "regex":
+      case "important":
+      case "variable":
+        return "#61afef";
+      default:
+        return "#d7dce2";
+    }
+  };
+
+  const drawHighlightedTextToCanvas = (ctx, text, lang, options) => {
+    const {
+      width,
+      height,
+      padding = 24,
+      lineHeight = 22,
+      font = "14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      bg = "#0f1220",
+    } = options || {};
+    ctx.save();
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+    ctx.font = font;
+    ctx.textBaseline = "top";
+    const grammar = getLanguageGrammar(lang);
+    const tokens = Prism.tokenize(text, grammar);
+
+    let x = padding;
+    let y = padding;
+    const drawStr = (s, color) => {
+      const parts = s.split("\n");
+      for (let i = 0; i < parts.length; i++) {
+        const segment = parts[i];
+        if (segment.length > 0) {
+          ctx.fillStyle = color;
+          ctx.fillText(segment, x, y);
+          x += ctx.measureText(segment).width;
+        }
+        if (i < parts.length - 1) {
+          x = padding;
+          y += lineHeight;
+        }
+      }
+    };
+
+    tokens.forEach((tok) => {
+      if (typeof tok === "string") {
+        drawStr(tok, getTokenColor("plain"));
+      } else {
+        const color = getTokenColor(tok.type);
+        const content = Array.isArray(tok.content)
+          ? tok.content.join("")
+          : tok.content;
+        drawStr(content, color);
+      }
+    });
+    ctx.restore();
+  };
+
+  const exportGif = async ({ fps = 12, scale = 1, maxFrames = 600 } = {}) => {
     if (isExporting) return;
     if (!previewRef.current) return;
     try {
@@ -121,6 +238,7 @@ export const CodeProvider = ({ children }) => {
       setExportError(null);
       setExportProgress(0);
       cancelExportRef.current = false;
+      setSuspendHighlight(true);
 
       const container = previewRef.current;
       const rect = container.getBoundingClientRect();
@@ -139,25 +257,29 @@ export const CodeProvider = ({ children }) => {
         background: "#0f1220",
       });
 
-      const totalFrames = input.length + 1;
-      for (let i = 0; i <= input.length; i += 1) {
+      const off = document.createElement("canvas");
+      off.width = width;
+      off.height = height;
+      const offCtx = off.getContext("2d");
+
+      const step = Math.max(
+        1,
+        Math.ceil(input.length / Math.max(1, maxFrames))
+      );
+      const totalFrames = Math.ceil(input.length / step) + 1;
+      for (let i = 0, f = 0; i <= input.length; i += step, f += 1) {
         if (cancelExportRef.current) break;
-        setCode(input.slice(0, i));
-        await waitForNextFrame(0);
-        const canvas = await htmlToImage.toCanvas(container, {
-          backgroundColor: "#0f1220",
-          width,
-          height,
-          style: {
-            transform: `scale(${scale})`,
-            transformOrigin: "top left",
-            width: `${rect.width}px`,
-            height: `${rect.height}px`,
-          },
-        });
-        gif.addFrame(canvas, { delay: frameDelay });
-        setExportProgress(i / totalFrames);
+        const typed = input.slice(0, i);
+        drawHighlightedTextToCanvas(offCtx, typed, language, { width, height });
+        gif.addFrame(off, { delay: frameDelay, copy: true });
+        setExportProgress(f / totalFrames);
         await waitForNextFrame(frameDelay);
+      }
+
+      // Ensure last full frame
+      if (!cancelExportRef.current && input.length % step !== 0) {
+        drawHighlightedTextToCanvas(offCtx, input, language, { width, height });
+        gif.addFrame(off, { delay: frameDelay, copy: true });
       }
 
       if (cancelExportRef.current) {
@@ -178,6 +300,7 @@ export const CodeProvider = ({ children }) => {
     } finally {
       setIsExporting(false);
       setExportProgress(1);
+      setSuspendHighlight(false);
     }
   };
 
@@ -206,7 +329,12 @@ export const CodeProvider = ({ children }) => {
     return preferred === "mp4" ? "video/webm" : "video/webm";
   };
 
-  const exportVideo = async ({ fps = 24, scale = 1, format = "webm" } = {}) => {
+  const exportVideo = async ({
+    fps = 24,
+    scale = 1,
+    format = "webm",
+    maxFrames = 1200,
+  } = {}) => {
     if (isExporting) return;
     if (!previewRef.current) return;
     try {
@@ -214,6 +342,7 @@ export const CodeProvider = ({ children }) => {
       setExportError(null);
       setExportProgress(0);
       cancelExportRef.current = false;
+      setSuspendHighlight(true);
 
       const container = previewRef.current;
       const rect = container.getBoundingClientRect();
@@ -249,24 +378,22 @@ export const CodeProvider = ({ children }) => {
 
       recorder.start();
 
-      const totalFrames = input.length + 1;
-      for (let i = 0; i <= input.length; i += 1) {
+      const preEl = container.querySelector("pre");
+      const hadLineNumbers = preEl?.classList.contains("line-numbers");
+      if (hadLineNumbers) preEl.classList.remove("line-numbers");
+
+      const step = Math.max(
+        1,
+        Math.ceil(input.length / Math.max(1, maxFrames))
+      );
+      const totalFrames = Math.ceil(input.length / step) + 1;
+      for (let i = 0, f = 0; i <= input.length; i += step, f += 1) {
         if (cancelExportRef.current) break;
         setCode(input.slice(0, i));
         await waitForNextFrame(0);
-        const frameCanvas = await htmlToImage.toCanvas(container, {
-          backgroundColor: "#0f1220",
-          width,
-          height,
-          style: {
-            transform: `scale(${scale})`,
-            transformOrigin: "top left",
-            width: `${rect.width}px`,
-            height: `${rect.height}px`,
-          },
-        });
-        ctx.drawImage(frameCanvas, 0, 0, width, height);
-        setExportProgress(i / totalFrames);
+        const typed = input.slice(0, i);
+        drawHighlightedTextToCanvas(ctx, typed, language, { width, height });
+        setExportProgress(f / totalFrames);
         await waitForNextFrame(frameDelay);
       }
 
@@ -282,13 +409,55 @@ export const CodeProvider = ({ children }) => {
       await stopRecorder();
 
       const blob = new Blob(chunks, { type: mimeType });
-      const ext = mimeType.includes("mp4") ? "mp4" : "webm";
-      downloadBlob(blob, `codeanimate.${ext}`);
+      let finalBlob = blob;
+      let finalExt = mimeType.includes("mp4") ? "mp4" : "webm";
+
+      if (format === "mp4" && finalExt !== "mp4") {
+        const ffmpeg = new FFmpeg();
+        await ffmpeg.load();
+        await ffmpeg.writeFile("input.webm", await fetchFile(blob));
+        await ffmpeg.exec([
+          "-i",
+          "input.webm",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "ultrafast",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+faststart",
+          "output.mp4",
+        ]);
+        const data = await ffmpeg.readFile("output.mp4");
+        finalBlob = new Blob([data.buffer], { type: "video/mp4" });
+        finalExt = "mp4";
+      } else if (format === "mov" && finalExt !== "mov") {
+        const ffmpeg = new FFmpeg();
+        await ffmpeg.load();
+        const inputName = finalExt === "mp4" ? "input.mp4" : "input.webm";
+        await ffmpeg.writeFile(inputName, await fetchFile(blob));
+        await ffmpeg.exec([
+          "-i",
+          inputName,
+          "-c:v",
+          "libx264",
+          "-pix_fmt",
+          "yuv420p",
+          "output.mov",
+        ]);
+        const data = await ffmpeg.readFile("output.mov");
+        finalBlob = new Blob([data.buffer], { type: "video/quicktime" });
+        finalExt = "mov";
+      }
+
+      downloadBlob(finalBlob, `codeanimate.${finalExt}`);
     } catch (err) {
       setExportError(err?.message || "Export failed");
     } finally {
       setIsExporting(false);
       setExportProgress(1);
+      setSuspendHighlight(false);
     }
   };
 
@@ -318,6 +487,7 @@ export const CodeProvider = ({ children }) => {
         language,
         setLanguage,
         exportVideo,
+        codeElRef,
       }}
     >
       {children}
